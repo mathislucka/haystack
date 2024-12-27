@@ -7,5 +7,13 @@ from .document_splitter import DocumentSplitter
 from .nltk_document_splitter import NLTKDocumentSplitter
 from .sentence_tokenizer import SentenceSplitter
 from .text_cleaner import TextCleaner
+from .document_token_truncater import DocumentTokenTruncater
 
-__all__ = ["DocumentSplitter", "DocumentCleaner", "NLTKDocumentSplitter", "SentenceSplitter", "TextCleaner"]
+__all__ = [
+    "DocumentSplitter",
+    "DocumentCleaner",
+    "NLTKDocumentSplitter",
+    "SentenceSplitter",
+    "TextCleaner",
+    "DocumentTokenTruncater"
+]
