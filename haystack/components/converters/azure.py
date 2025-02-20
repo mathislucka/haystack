@@ -2,25 +2,31 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import copy
 import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
-
-import networkx as nx
-import pandas as pd
 
 from haystack import Document, component, default_from_dict, default_to_dict, logging
 from haystack.components.converters.utils import get_bytestream_from_source, normalize_metadata
 from haystack.dataclasses import ByteStream
 from haystack.lazy_imports import LazyImport
 from haystack.utils import Secret, deserialize_secrets_inplace
+from haystack.utils.azure_ocr_utils import (
+    construct_text_from_rows_of_objects_by_page,
+    get_lines_per_page,
+    get_paragraphs_per_page,
+    get_rows_of_objects_by_page,
+    get_table_content,
+    get_tables_per_page,
+    insert_tables_into_objects_by_page,
+    remove_objects_contained_within_tables,
+)
 
 logger = logging.getLogger(__name__)
 
 with LazyImport(message="Run 'pip install \"azure-ai-formrecognizer>=3.2.0b2\"'") as azure_import:
-    from azure.ai.formrecognizer import AnalyzeResult, DocumentAnalysisClient, DocumentLine, DocumentParagraph
+    from azure.ai.formrecognizer import AnalysisFeature, AnalyzeResult, DocumentAnalysisClient
     from azure.core.credentials import AzureKeyCredential
 
 
@@ -57,9 +63,15 @@ class AzureOCRDocumentConverter:
         preceding_context_len: int = 3,
         following_context_len: int = 3,
         merge_multiple_column_headers: bool = True,
-        page_layout: Literal["natural", "single_column"] = "natural",
+        page_layout: Literal[
+            "natural", "single_column_by_line", "single_column_by_paragraph", "single_column"
+        ] = "natural",
         threshold_y: Optional[float] = 0.05,
         store_full_path: bool = False,
+        *,
+        analysis_features: Optional[List[str]] = None,
+        table_format: Literal["csv", "text"] = "csv",
+        extract_tables_separately: bool = True,
     ):
         """
         Creates an AzureOCRDocumentConverter component.
@@ -80,18 +92,31 @@ class AzureOCRDocumentConverter:
             - `natural`: Uses the natural reading order determined by Azure.
             - `single_column`: Groups all lines with the same height on the page based on a threshold
             determined by `threshold_y`.
-        :param threshold_y: Only relevant if `single_column` is set to `page_layout`.
-            The threshold, in inches, to determine if two recognized PDF elements are grouped into a
-            single line. This is crucial for section headers or numbers which may be spatially separated
-            from the remaining text on the horizontal axis.
-        :param store_full_path:
-            If True, the full path of the file is stored in the metadata of the document.
-            If False, only the file name is stored.
+        :param page_layout: The type reading order to follow.
+            - "natural" means the natural reading order determined by Azure will be used
+            - "single_column_by_line" means all lines with the same height on the page will be grouped together
+            based on a threshold determined by `threshold_y`
+            - "single_column_by_paragraph" means all paragraphs with the same height on the page will be grouped
+            together based on a threshold determined by `threshold_y`
+            - "single_column" is the same as "single_column_by_line" and is kept for backwards compatibility
+        :param threshold_y: The threshold to determine if two recognized elements in a PDF should be grouped into a
+            single line. This is especially relevant for section headers or numbers which may be spatially separated
+            on the horizontal axis from the remaining text. The threshold is specified in units of inches.
+            This is only relevant if "single_column" is chosen for `page_layout`.
+        :param analysis_features: Additional document analysis features to enable for Azure Form Recognizer.
+            They include "ocrHighResolution", "languages", "barcodes", "formulas", "keyValuePairs", "styleFont".
+        :param table_format: The format in which the tables should be returned. Options are "csv" or "text".
+        :param extract_tables_separately: Whether to save detected tables from the document separately in a tabular
+            format determined by `table_format`. If set to False, tables will be included with the other text.
         """
         azure_import.check()
 
+        self.analysis_features = analysis_features
+        _analysis_features = None
+        if analysis_features:
+            _analysis_features = [AnalysisFeature(feature) for feature in analysis_features]
         self.document_analysis_client = DocumentAnalysisClient(
-            endpoint=endpoint, credential=AzureKeyCredential(api_key.resolve_value() or "")
+            endpoint=endpoint, credential=AzureKeyCredential(api_key.resolve_value() or ""), features=_analysis_features
         )  # type: ignore
         self.endpoint = endpoint
         self.model_id = model_id
@@ -104,6 +129,11 @@ class AzureOCRDocumentConverter:
         self.store_full_path = store_full_path
         if self.page_layout == "single_column" and self.threshold_y is None:
             self.threshold_y = 0.05
+
+        self.table_format = table_format
+        self.extract_tables_separately = extract_tables_separately
+        if self.extract_tables_separately and self.table_format == "text":
+            raise ValueError("Table format 'text' is not supported when extracting tables separately. Choose 'csv'.")
 
     @component.output_types(documents=List[Document], raw_azure_response=List[Dict])
     def run(self, sources: List[Union[str, Path, ByteStream]], meta: Optional[List[Dict[str, Any]]] = None):
@@ -167,6 +197,9 @@ class AzureOCRDocumentConverter:
             page_layout=self.page_layout,
             threshold_y=self.threshold_y,
             store_full_path=self.store_full_path,
+            analysis_features=self.analysis_features,
+            table_format=self.table_format,
+            extract_tables_separately=self.extract_tables_separately,
         )
 
     @classmethod
@@ -193,16 +226,24 @@ class AzureOCRDocumentConverter:
             Can be any custom keys and values.
         :returns: List of Documents containing the tables and text extracted from the AnalyzeResult object.
         """
-        tables = self._convert_tables(result=result, meta=meta)
-        if self.page_layout == "natural":
-            text = self._convert_to_natural_text(result=result, meta=meta)
+        if self.extract_tables_separately:
+            tables = self._extract_table_documents(result=result, meta=meta)
         else:
-            assert isinstance(self.threshold_y, float)
-            text = self._convert_to_single_column_text(result=result, meta=meta, threshold_y=self.threshold_y)
-        docs = [*tables, text]
-        return docs
+            tables = []
 
-    def _convert_tables(self, result: "AnalyzeResult", meta: Optional[Dict[str, Any]]) -> List[Document]:
+        if self.page_layout == "natural":
+            text = self._extract_text_doc_with_natural_ordering(result=result, meta=meta)
+        elif self.page_layout in {"single_column_by_line", "single_column"}:
+            text = self._extract_text_doc_with_single_column_ordering(
+                result=result, object_type="line", meta=meta, threshold_y=self.threshold_y
+            )
+        else:
+            text = self._extract_text_doc_with_single_column_ordering(
+                result=result, object_type="paragraph", meta=meta, threshold_y=self.threshold_y
+            )
+        return [*tables, text]
+
+    def _extract_table_documents(self, result: "AnalyzeResult", meta: Optional[Dict[str, Any]]) -> List[Document]:
         """
         Converts the tables extracted by Azure's Document Intelligence service into Haystack Documents.
 
@@ -217,43 +258,7 @@ class AzureOCRDocumentConverter:
             return converted_tables
 
         for table in result.tables:
-            # Initialize table with empty cells
-            table_list = [[""] * table.column_count for _ in range(table.row_count)]
-            additional_column_header_rows = set()
-            caption = ""
-            row_idx_start = 0
-
-            for idx, cell in enumerate(table.cells):
-                # Remove ':selected:'/':unselected:' tags from cell's content
-                cell.content = cell.content.replace(":selected:", "")
-                cell.content = cell.content.replace(":unselected:", "")
-
-                # Check if first row is a merged cell spanning whole table
-                # -> exclude this row and use as a caption
-                if idx == 0 and cell.column_span == table.column_count:
-                    caption = cell.content
-                    row_idx_start = 1
-                    table_list.pop(0)
-                    continue
-
-                column_span = cell.column_span if cell.column_span else 0
-                for c in range(column_span):  # pylint: disable=invalid-name
-                    row_span = cell.row_span if cell.row_span else 0
-                    for r in range(row_span):  # pylint: disable=invalid-name
-                        if (
-                            self.merge_multiple_column_headers
-                            and cell.kind == "columnHeader"
-                            and cell.row_index > row_idx_start
-                        ):
-                            # More than one row serves as column header
-                            table_list[0][cell.column_index + c] += f"\n{cell.content}"
-                            additional_column_header_rows.add(cell.row_index - row_idx_start)
-                        else:
-                            table_list[cell.row_index + r - row_idx_start][cell.column_index + c] = cell.content
-
-            # Remove additional column header rows, as these got attached to the first row
-            for row_idx in sorted(additional_column_header_rows, reverse=True):
-                del table_list[row_idx]
+            table_content = get_table_content(table=table, table_format=self.table_format)  # type: ignore
 
             # Get preceding context of table
             if table.bounding_regions:
@@ -269,7 +274,7 @@ class AzureOCRDocumentConverter:
                 ]
             else:
                 preceding_lines = []
-            preceding_context = "\n".join(preceding_lines[-self.preceding_context_len :]) + f"\n{caption}"
+            preceding_context = "\n".join(preceding_lines[-self.preceding_context_len :])
             preceding_context = preceding_context.strip()
 
             # Get following context
@@ -291,186 +296,99 @@ class AzureOCRDocumentConverter:
                 following_lines = []
             following_context = "\n".join(following_lines[: self.following_context_len])
 
-            table_meta = copy.deepcopy(meta)
-
-            if isinstance(table_meta, dict):
-                table_meta["preceding_context"] = preceding_context
-                table_meta["following_context"] = following_context
-            else:
-                table_meta = {"preceding_context": preceding_context, "following_context": following_context}
+            if meta is None:
+                meta = {}
+            table_meta = {**meta, "preceding_context": preceding_context, "following_context": following_context}
 
             if table.bounding_regions:
                 table_meta["page"] = table.bounding_regions[0].page_number
 
-            table_df = pd.DataFrame(columns=table_list[0], data=table_list[1:])
+            converted_tables.append(Document(content=table_content, meta=table_meta))
 
-            converted_tables.append(Document(dataframe=table_df, meta=table_meta))
-
+        # Sort by page number
+        converted_tables = sorted(converted_tables, key=lambda x: x.meta.get("page", 0))
         return converted_tables
 
-    def _convert_to_natural_text(self, result: "AnalyzeResult", meta: Optional[Dict[str, Any]]) -> Document:
-        """
-        This converts the `AnalyzeResult` object into a single document.
-
-        We add "\f" separators between to differentiate between the text on separate pages. This is the expected format
-        for the PreProcessor.
-
-        :param result: The AnalyzeResult object returned by the `begin_analyze_document` method. Docs on Analyze result
-            can be found [here](https://azuresdkdocs.blob.core.windows.net/$web/python/azure-ai-formrecognizer/3.3.0/azure.ai.formrecognizer.html?highlight=read#azure.ai.formrecognizer.AnalyzeResult).
-        :param meta: Optional dictionary with metadata that shall be attached to all resulting documents.
-            Can be any custom keys and values.
-        :returns: A single Document containing all the text extracted from the AnalyzeResult object.
-        """
-        table_spans_by_page = self._collect_table_spans(result=result)
-
-        texts = []
-        if result.paragraphs:
-            paragraphs_to_pages: Dict[int, str] = defaultdict(str)
-            for paragraph in result.paragraphs:
-                if paragraph.bounding_regions:
-                    # If paragraph spans multiple pages we group it with the first page number
-                    page_numbers = [b.page_number for b in paragraph.bounding_regions]
-                else:
-                    # If page_number is not available we put the paragraph onto an existing page
-                    current_last_page_number = sorted(paragraphs_to_pages.keys())[-1] if paragraphs_to_pages else 1
-                    page_numbers = [current_last_page_number]
-                tables_on_page = table_spans_by_page[page_numbers[0]]
-                # Check if paragraph is part of a table and if so skip
-                if self._check_if_in_table(tables_on_page, line_or_paragraph=paragraph):
-                    continue
-                paragraphs_to_pages[page_numbers[0]] += paragraph.content + "\n"
-
-            max_page_number: int = max(paragraphs_to_pages)
-            for page_idx in range(1, max_page_number + 1):
-                # We add empty strings for missing pages so the preprocessor can still extract the correct page number
-                # from the original PDF.
-                page_text = paragraphs_to_pages.get(page_idx, "")
-                texts.append(page_text)
-        else:
-            logger.warning("No text paragraphs were detected by the OCR conversion.")
-
-        all_text = "\f".join(texts)
-        return Document(content=all_text, meta=meta if meta else {})
-
-    def _convert_to_single_column_text(
-        self, result: "AnalyzeResult", meta: Optional[Dict[str, str]], threshold_y: float = 0.05
+    def _extract_text_doc_with_single_column_ordering(
+        self,
+        result: "AnalyzeResult",
+        object_type: Literal["line", "paragraph"],
+        meta: Optional[Dict[str, str]],
+        threshold_y: float = 0.05,
     ) -> Document:
         """
-        This converts the `AnalyzeResult` object into a single Haystack Document.
+        Converts the text extracted by Azure's Document Intelligence service.
 
-        We add "\f" separators between to differentiate between the text on separate pages. This is the expected format
-        for the PreProcessor.
+        This converts the `AnalyzeResult` object into a single Haystack Document. We add "\f" separators between pages
+        to differentiate between the text on separate pages.
 
-        :param result: The AnalyzeResult object returned by the `begin_analyze_document` method. Docs on Analyze result
-            can be found [here](https://azuresdkdocs.blob.core.windows.net/$web/python/azure-ai-formrecognizer/3.3.0/azure.ai.formrecognizer.html?highlight=read#azure.ai.formrecognizer.AnalyzeResult).
+        :param result: The AnalyzeResult object returned by the `DocumentAnalysisClient.begin_analyze_document` method.
+        :param object_type: Type of objects to group. Either "line" or "paragraph".
         :param meta: Optional dictionary with metadata that shall be attached to all resulting documents.
-            Can be any custom keys and values.
-        :param threshold_y: height threshold in inches for PDF and pixels for images
-        :returns: A single Document containing all the text extracted from the AnalyzeResult object.
+        :param threshold_y: Threshold for the y-value difference between the upper left coordinate of the bounding box
+            of two paragraphs to be considered part of the same row.
         """
-        table_spans_by_page = self._collect_table_spans(result=result)
+        tables_by_page = get_tables_per_page(result=result)
 
-        # Find all pairs of lines that should be grouped together based on the y-value of the upper left coordinate
-        # of their bounding box
-        pairs_by_page = defaultdict(list)
-        for page_idx, page in enumerate(result.pages):
-            lines = page.lines if page.lines else []
-            # Only works if polygons is available
-            if all(line.polygon is not None for line in lines):
-                for i in range(len(lines)):  # pylint: disable=consider-using-enumerate
-                    # left_upi, right_upi, right_lowi, left_lowi = lines[i].polygon
-                    left_upi, _, _, _ = lines[i].polygon  # type: ignore
-                    pairs_by_page[page_idx].append([i, i])
-                    for j in range(i + 1, len(lines)):  # pylint: disable=invalid-name
-                        left_upj, _, _, _ = lines[j].polygon  # type: ignore
-                        close_on_y_axis = abs(left_upi[1] - left_upj[1]) < threshold_y
-                        if close_on_y_axis:
-                            pairs_by_page[page_idx].append([i, j])
-            # Default if polygon is not available
-            else:
-                logger.info(
-                    "Polygon information for lines on page {page_idx} is not available so it is not possible "
-                    "to enforce a single column page layout.".format(page_idx=page_idx)
-                )
-                for i in range(len(lines)):
-                    pairs_by_page[page_idx].append([i, i])
+        if object_type == "line":
+            objects_by_page = get_lines_per_page(result=result)
+        else:
+            objects_by_page = get_paragraphs_per_page(result=result)
 
-        # merged the line pairs that are connected by page
-        merged_pairs_by_page = {}
-        for page_idx in pairs_by_page:
-            graph = nx.Graph()
-            graph.add_edges_from(pairs_by_page[page_idx])
-            merged_pairs_by_page[page_idx] = [list(a) for a in list(nx.connected_components(graph))]
+        if self.extract_tables_separately:
+            objects_by_page = remove_objects_contained_within_tables(
+                objects_by_page=objects_by_page, tables_by_page=tables_by_page
+            )
+        elif self.table_format == "csv":
+            objects_by_page = remove_objects_contained_within_tables(
+                objects_by_page=objects_by_page, tables_by_page=tables_by_page
+            )
+            objects_by_page = insert_tables_into_objects_by_page(
+                objects_by_page=objects_by_page, tables_by_page=tables_by_page
+            )
 
-        # Convert line indices to the DocumentLine objects
-        merged_lines_by_page = {}
-        for page_idx, page in enumerate(result.pages):
-            rows = []
-            lines = page.lines if page.lines else []
-            # We use .get(page_idx, []) since the page could be empty
-            for row_of_lines in merged_pairs_by_page.get(page_idx, []):
-                lines_in_row = [lines[line_idx] for line_idx in row_of_lines]
-                rows.append(lines_in_row)
-            merged_lines_by_page[page_idx] = rows
+        rows_of_objects_by_page = get_rows_of_objects_by_page(objects_by_page=objects_by_page, threshold_y=threshold_y)
 
-        # Sort the merged pairs in each row by the x-value of the upper left bounding box coordinate
-        x_sorted_lines_by_page = {}
-        for page_idx, _ in enumerate(result.pages):
-            sorted_rows = []
-            for row_of_lines in merged_lines_by_page[page_idx]:
-                sorted_rows.append(sorted(row_of_lines, key=lambda x: x.polygon[0][0]))  # type: ignore
-            x_sorted_lines_by_page[page_idx] = sorted_rows
+        all_text = construct_text_from_rows_of_objects_by_page(
+            rows_of_objects_by_page=rows_of_objects_by_page, result=result
+        )
+        return Document(content=all_text, meta=meta)
 
-        # Sort each row within the page by the y-value of the upper left bounding box coordinate
-        y_sorted_lines_by_page = {}
-        for page_idx, _ in enumerate(result.pages):
-            sorted_rows = sorted(x_sorted_lines_by_page[page_idx], key=lambda x: x[0].polygon[0][1])  # type: ignore
-            y_sorted_lines_by_page[page_idx] = sorted_rows
-
-        # Construct the text to write
-        texts = []
-        for page_idx, page in enumerate(result.pages):
-            tables_on_page = table_spans_by_page[page.page_number]
-            page_text = ""
-            for row_of_lines in y_sorted_lines_by_page[page_idx]:
-                # Check if line is part of a table and if so skip
-                if any(self._check_if_in_table(tables_on_page, line_or_paragraph=line) for line in row_of_lines):
-                    continue
-                page_text += " ".join(line.content for line in row_of_lines)
-                page_text += "\n"
-            texts.append(page_text)
-        all_text = "\f".join(texts)
-        return Document(content=all_text, meta=meta if meta else {})
-
-    def _collect_table_spans(self, result: "AnalyzeResult") -> Dict:
+    def _extract_text_doc_with_natural_ordering(
+        self, result: "AnalyzeResult", meta: Optional[Dict[str, str]]
+    ) -> Document:
         """
-        Collect the spans of all tables by page number.
+        Converts the text extracted by Azure's Document Intelligence service.
 
-        :param result: The AnalyzeResult object returned by the `begin_analyze_document` method.
-        :returns: A dictionary with the page number as key and a list of table spans as value.
-        """
-        table_spans_by_page = defaultdict(list)
-        tables = result.tables if result.tables else []
-        for table in tables:
-            if not table.bounding_regions:
-                continue
-            table_spans_by_page[table.bounding_regions[0].page_number].append(table.spans[0])
-        return table_spans_by_page
+        This converts the `AnalyzeResult` object into a single Haystack Document. We add "\f" separators between to
+        differentiate between the text on separate pages.
 
-    def _check_if_in_table(
-        self, tables_on_page: dict, line_or_paragraph: Union["DocumentLine", "DocumentParagraph"]
-    ) -> bool:
+        :param result: The AnalyzeResult object returned by the `DocumentAnalysisClient.begin_analyze_document` method.
+        :param meta: Optional dictionary with metadata that shall be attached to all resulting documents.
         """
-        Check if a line or paragraph is part of a table.
+        tables_by_page = get_tables_per_page(result=result)
+        paragraphs_by_page = get_paragraphs_per_page(result=result)
 
-        :param tables_on_page: A dictionary with the page number as key and a list of table spans as value.
-        :param line_or_paragraph: The line or paragraph to check.
-        :returns: True if the line or paragraph is part of a table, False otherwise.
-        """
-        in_table = False
-        # Check if line is part of a table
-        for table in tables_on_page:
-            if table.offset <= line_or_paragraph.spans[0].offset <= table.offset + table.length:
-                in_table = True
-                break
-        return in_table
+        if self.extract_tables_separately:
+            paragraphs_by_page = remove_objects_contained_within_tables(
+                objects_by_page=paragraphs_by_page, tables_by_page=tables_by_page
+            )
+        elif self.table_format == "csv":
+            paragraphs_by_page = remove_objects_contained_within_tables(
+                objects_by_page=paragraphs_by_page, tables_by_page=tables_by_page
+            )
+            paragraphs_by_page = insert_tables_into_objects_by_page(
+                objects_by_page=paragraphs_by_page, tables_by_page=tables_by_page
+            )
+
+        rows_of_objects_by_page: Dict = defaultdict(list)
+        for page in result.pages:
+            paragraphs_on_page = paragraphs_by_page.get(page.page_number, [])
+            sorted_objects_on_page = sorted(paragraphs_on_page, key=lambda x: x.spans[0].offset)
+            for obj in sorted_objects_on_page:
+                rows_of_objects_by_page[page.page_number].append([obj])
+
+        all_text = construct_text_from_rows_of_objects_by_page(
+            rows_of_objects_by_page=rows_of_objects_by_page, result=result
+        )
+        return Document(content=all_text, meta=meta)

@@ -36,6 +36,44 @@ if azure_import.is_successful() and pandas_import.is_successful():
                 for r in range(row_span):
                     table_list[cell.row_index + r][cell.column_index + c] = cell.content
 
+        # TODO Re-enable this code once the merge_multiple_column_headers parameter is added to the function
+        # # Initialize table with empty cells
+        # additional_column_header_rows = set()
+        # caption = ""
+        # row_idx_start = 0
+        #
+        # for idx, cell in enumerate(table.cells):
+        #     # Remove ':selected:'/':unselected:' tags from cell's content
+        #     cell.content = cell.content.replace(":selected:", "")
+        #     cell.content = cell.content.replace(":unselected:", "")
+        #
+        #     # Check if first row is a merged cell spanning whole table
+        #     # -> exclude this row and use as a caption
+        #     if idx == 0 and cell.column_span == table.column_count:
+        #         caption = cell.content
+        #         row_idx_start = 1
+        #         table_list.pop(0)
+        #         continue
+        #
+        #     column_span = cell.column_span if cell.column_span else 0
+        #     for c in range(column_span):  # pylint: disable=invalid-name
+        #         row_span = cell.row_span if cell.row_span else 0
+        #         for r in range(row_span):  # pylint: disable=invalid-name
+        #             if (
+        #                 self.merge_multiple_column_headers
+        #                 and cell.kind == "columnHeader"
+        #                 and cell.row_index > row_idx_start
+        #             ):
+        #                 # More than one row serves as column header
+        #                 table_list[0][cell.column_index + c] += f"\n{cell.content}"
+        #                 additional_column_header_rows.add(cell.row_index - row_idx_start)
+        #             else:
+        #                 table_list[cell.row_index + r - row_idx_start][cell.column_index + c] = cell.content
+        #
+        # # Remove additional column header rows, as these got attached to the first row
+        # for row_idx in sorted(additional_column_header_rows, reverse=True):
+        #     del table_list[row_idx]
+
         if table_format == "csv":
             table_df = pd.DataFrame(data=table_list)
             table_content = table_df.to_csv(header=False, index=False)
