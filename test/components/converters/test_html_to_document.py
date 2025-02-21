@@ -190,11 +190,9 @@ class TestHTMLToDocument:
         assert len(result["documents"]) == 1
         assert "Superlinear" in result["documents"][0].content
 
-    @patch("haystack.components.converters.html.extract")
+    @patch("haystack.components.converters.html.extract", return_value="test")
     def test_run_with_extraction_kwargs(self, mock_extract, test_files_path):
         sources = [test_files_path / "html" / "what_is_haystack.html"]
-
-        mock_extract.return_value = "test"
 
         converter = HTMLToDocument()
         converter.run(sources=sources)
@@ -203,7 +201,6 @@ class TestHTMLToDocument:
 
         precise_converter = HTMLToDocument(extraction_kwargs={"favor_precision": True})
         mock_extract.reset_mock()
-        mock_extract.return_value = "test"
         precise_converter.run(sources=sources)
         assert mock_extract.call_count == 1
         assert mock_extract.call_args[1]["favor_precision"] is True

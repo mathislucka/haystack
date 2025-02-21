@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import hashlib
-import io
-import warnings
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Optional
 
@@ -31,7 +29,7 @@ class _BackwardCompatible(type):
         """
         ### Conversion from 1.x Document ###
         content = kwargs.get("content")
-        if not isinstance(content, (str, type(None))):
+        if content and not isinstance(content, str):
             raise ValueError("The `content` field must be a string or None.")
 
         # Not used anymore
@@ -119,12 +117,13 @@ class Document(metaclass=_BackwardCompatible):
         Creates a hash of the given content that acts as the document's ID.
         """
         text = self.content or None
+        dataframe = None  # this allows the ID creation to remain unchanged even if the dataframe field has been removed
         blob = self.blob.data if self.blob is not None else None
         mime_type = self.blob.mime_type if self.blob is not None else None
         meta = self.meta or {}
         embedding = self.embedding if self.embedding is not None else None
         sparse_embedding = self.sparse_embedding.to_dict() if self.sparse_embedding is not None else ""
-        data = f"{text}{blob}{mime_type}{meta}{embedding}{sparse_embedding}"
+        data = f"{text}{dataframe}{blob}{mime_type}{meta}{embedding}{sparse_embedding}"
         return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
     def to_dict(self, flatten=True) -> Dict[str, Any]:

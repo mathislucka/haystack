@@ -7,7 +7,6 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import dateutil.parser
-import pandas as pd
 
 from haystack.dataclasses import Document
 from haystack.errors import FilterError

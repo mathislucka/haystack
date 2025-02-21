@@ -23,7 +23,7 @@ def test_document_str(doc, doc_str):
 
 def test_init():
     doc = Document()
-    assert doc.id == "9ba126c4e4109657a7f048b7c83496d8c289b391dfe78e6e45372d46116ad7f8"
+    assert doc.id == "d4675c57fcfe114db0b95f1da46eea3c5d6f5729c17d01fb5251ae19830a3455"
     assert doc.content == None
     assert doc.blob == None
     assert doc.meta == {}
@@ -48,7 +48,7 @@ def test_init_with_parameters():
         embedding=[0.1, 0.2, 0.3],
         sparse_embedding=sparse_embedding,
     )
-    assert doc.id == "b3b2be3a55c7ddd949d06762cc6a3d0d20e6f0c1e5b2868d65355d3acc2572ae"
+    assert doc.id == "1aa43af57c1dbc317241bf55d3067049f334d3b458d95dc72f71a7111f6c1a56"
     assert doc.content == "test text"
     assert doc.blob.data == blob_data
     assert doc.blob.mime_type == "text/markdown"
@@ -66,7 +66,7 @@ def test_init_with_legacy_fields():
         score=0.812,
         embedding=[0.1, 0.2, 0.3],  # type: ignore
     )
-    assert doc.id == "c342b9b422bde5efaa62fae80dd536aedc2211d45bb3f305fb715d9072c30bab"
+    assert doc.id == "18fc2c114825872321cf5009827ca162f54d3be50ab9e9ffa027824b6ec223af"
     assert doc.content == "test text"
     assert doc.blob == None
     assert doc.meta == {}
@@ -84,7 +84,7 @@ def test_init_with_legacy_field():
         embedding=[0.1, 0.2, 0.3],
         meta={"date": "10-10-2023", "type": "article"},
     )
-    assert doc.id == "4350de4f35ea989fb0aace39b58c139c56b15e235b66a4589864f4cec8a673e4"
+    assert doc.id == "a2c0321b34430cc675294611e55529fceb56140ca3202f1c59a43a8cecac1f43"
     assert doc.content == "test text"
     assert doc.meta == {"date": "10-10-2023", "type": "article"}
     assert doc.score == 0.812
