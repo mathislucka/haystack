@@ -283,3 +283,9 @@ def test_content_type():
 
     with pytest.raises(ValueError):
         _ = Document().content_type
+
+
+def test_dataframe_is_not_supported():
+    with pytest.raises(ValueError, match="The `dataframe` field is no longer supported."):
+        dataframe = pd.DataFrame({"col1": [1], "col2": [2]})
+        Document(dataframe=dataframe, content="test text")
