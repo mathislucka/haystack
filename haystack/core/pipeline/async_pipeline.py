@@ -216,20 +216,31 @@ class AsyncPipeline(PipelineBase):
                     logger.info("Running component {component_name}", component_name=component_name)
 
                     # Get and use OpenTelemetry's context with the current span for async operations
-                    if hasattr(opentelemetry, "context"):
-                        # Import lazy to avoid hard dependency
-                        from opentelemetry import context as otel_context
-                        # Capture the current context with active span
-                        token = otel_context.attach(otel_context.get_current())
+                    if has_opentelemetry and 'opentelemetry.context' in sys.modules:
+                        # Directly use otel_context from earlier import
                         try:
+                            # Import lazy to avoid hard dependency
+                            from opentelemetry import context as otel_context
+                            # Capture the current context with active span
+                            current_context = otel_context.get_current()
+                            token = otel_context.attach(current_context)
+                            try:
+                                if getattr(instance, "__haystack_supports_async__", False):
+                                    outputs = await instance.run_async(**component_inputs)  # type: ignore
+                                else:
+                                    loop = asyncio.get_running_loop()
+                                    # Pass context to executor for synchronous components
+                                    outputs = await loop.run_in_executor(None, lambda: instance.run(**component_inputs))
+                            finally:
+                                # Restore original context
+                                otel_context.detach(token)
+                        except (ImportError, AttributeError):
+                            # Fallback if opentelemetry context is not properly available
                             if getattr(instance, "__haystack_supports_async__", False):
                                 outputs = await instance.run_async(**component_inputs)  # type: ignore
                             else:
                                 loop = asyncio.get_running_loop()
                                 outputs = await loop.run_in_executor(None, lambda: instance.run(**component_inputs))
-                        finally:
-                            # Restore original context
-                            otel_context.detach(token)
                     else:
                         # Fallback if OpenTelemetry context is not available
                         if getattr(instance, "__haystack_supports_async__", False):
