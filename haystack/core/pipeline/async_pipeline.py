@@ -311,12 +311,34 @@ class AsyncPipeline(PipelineBase):
                 component_inputs = self._consume_component_inputs(component_name, comp_dict, inputs_state)
                 component_inputs = self._add_missing_input_defaults(component_inputs, comp_dict["input_sockets"])
 
-                async def _runner():
-                    async with ready_sem:
-                        result = await _run_component_async(component_name, component_inputs)
+                # Capture the current OpenTelemetry context for the task
+                # We'll import these modules lazily to avoid hard dependencies
+                current_context = None
+                if 'opentelemetry' in globals():
+                    try:
+                        from opentelemetry import context as otel_context
+                        current_context = otel_context.get_current()
+                    except (ImportError, AttributeError):
+                        pass
 
-                    scheduled_components.remove(component_name)
-                    return result
+                async def _runner():
+                    # Attach the captured context when running the task
+                    if current_context:
+                        from opentelemetry import context as otel_context
+                        token = otel_context.attach(current_context)
+                        try:
+                            async with ready_sem:
+                                result = await _run_component_async(component_name, component_inputs)
+                            scheduled_components.remove(component_name)
+                            return result
+                        finally:
+                            otel_context.detach(token)
+                    else:
+                        # Fallback if context capture failed
+                        async with ready_sem:
+                            result = await _run_component_async(component_name, component_inputs)
+                        scheduled_components.remove(component_name)
+                        return result
 
                 task = asyncio.create_task(_runner())
                 running_tasks[task] = component_name
