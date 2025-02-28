@@ -52,7 +52,14 @@ class OpenTelemetryTracer(Tracer):
         self, operation_name: str, tags: Optional[Dict[str, Any]] = None, parent_span: Optional[Span] = None
     ) -> Iterator[Span]:
         """Activate and return a new span that inherits from the current active span."""
-        with self._tracer.start_as_current_span(operation_name) as raw_span:
+        # If parent_span is provided and is an OpenTelemetrySpan, use its context
+        context = None
+        if parent_span and isinstance(parent_span, OpenTelemetrySpan):
+            parent_context = parent_span.raw_span().get_span_context()
+            context = opentelemetry.trace.set_span_in_context(opentelemetry.trace.NonRecordingSpan(parent_context))
+        
+        # Start the span with the parent context if available
+        with self._tracer.start_as_current_span(operation_name, context=context) as raw_span:
             span = OpenTelemetrySpan(raw_span)
             if tags:
                 span.set_tags(tags)
