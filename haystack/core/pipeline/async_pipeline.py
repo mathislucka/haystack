@@ -154,6 +154,9 @@ class AsyncPipeline(PipelineBase):
         # We fill the queue once and raise if all components are BLOCKED
         self.validate_pipeline(self._fill_queue(ordered_names, inputs_state, component_visits))
 
+        # Check if OpenTelemetry is available
+        has_opentelemetry = 'opentelemetry' in globals()
+        
         # Single parent span for entire pipeline execution
         with tracing.tracer.trace(
             "haystack.async_pipeline.run",
