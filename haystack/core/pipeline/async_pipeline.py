@@ -207,11 +207,28 @@ class AsyncPipeline(PipelineBase):
                     span.set_content_tag("haystack.component.input", deepcopy(component_inputs))
                     logger.info("Running component {component_name}", component_name=component_name)
 
-                    if getattr(instance, "__haystack_supports_async__", False):
-                        outputs = await instance.run_async(**component_inputs)  # type: ignore
+                    # Get and use OpenTelemetry's context with the current span for async operations
+                    if hasattr(opentelemetry, "context"):
+                        # Import lazy to avoid hard dependency
+                        from opentelemetry import context as otel_context
+                        # Capture the current context with active span
+                        token = otel_context.attach(otel_context.get_current())
+                        try:
+                            if getattr(instance, "__haystack_supports_async__", False):
+                                outputs = await instance.run_async(**component_inputs)  # type: ignore
+                            else:
+                                loop = asyncio.get_running_loop()
+                                outputs = await loop.run_in_executor(None, lambda: instance.run(**component_inputs))
+                        finally:
+                            # Restore original context
+                            otel_context.detach(token)
                     else:
-                        loop = asyncio.get_running_loop()
-                        outputs = await loop.run_in_executor(None, lambda: instance.run(**component_inputs))
+                        # Fallback if OpenTelemetry context is not available
+                        if getattr(instance, "__haystack_supports_async__", False):
+                            outputs = await instance.run_async(**component_inputs)  # type: ignore
+                        else:
+                            loop = asyncio.get_running_loop()
+                            outputs = await loop.run_in_executor(None, lambda: instance.run(**component_inputs))
 
                     component_visits[component_name] += 1
 
