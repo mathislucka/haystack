@@ -11,6 +11,11 @@ from haystack.core.component import Component
 from haystack.core.errors import PipelineMaxComponentRuns, PipelineRuntimeError
 from haystack.core.pipeline.base import ComponentPriority, PipelineBase
 from haystack.telemetry import pipeline_running
+from haystack.lazy_imports import LazyImport
+
+# Lazy import OpenTelemetry to avoid hard dependency
+with LazyImport("Run 'pip install opentelemetry-sdk'") as opentelemetry_import:
+    import opentelemetry
 
 logger = logging.getLogger(__name__)
 
