@@ -334,7 +334,7 @@ class AsyncPipeline(PipelineBase):
                 # Capture the current OpenTelemetry context for the task
                 # We'll import these modules lazily to avoid hard dependencies
                 current_context = None
-                if 'opentelemetry' in globals():
+                if has_opentelemetry and 'opentelemetry.context' in sys.modules:
                     try:
                         from opentelemetry import context as otel_context
                         current_context = otel_context.get_current()
