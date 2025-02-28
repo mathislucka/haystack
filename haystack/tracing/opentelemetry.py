@@ -35,6 +35,14 @@ class OpenTelemetrySpan(Span):
         :return: The underlying span object.
         """
         return self._span
+        
+    def get_span_context(self) -> Any:
+        """
+        Returns the span context that can be used for context propagation.
+        
+        :return: The span context for the current span.
+        """
+        return self._span.get_span_context()
 
     def get_correlation_data_for_logs(self) -> Dict[str, Any]:
         """Return a dictionary with correlation data for logs."""
