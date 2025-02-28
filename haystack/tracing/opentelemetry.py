@@ -12,6 +12,7 @@ from haystack.tracing import utils as tracing_utils
 with LazyImport("Run 'pip install opentelemetry-sdk'") as opentelemetry_import:
     import opentelemetry
     import opentelemetry.trace
+    from opentelemetry import context as otel_context
 
 
 class OpenTelemetrySpan(Span):
