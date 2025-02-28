@@ -60,12 +60,18 @@ class OpenTelemetryTracer(Tracer):
     def trace(
         self, operation_name: str, tags: Optional[Dict[str, Any]] = None, parent_span: Optional[Span] = None
     ) -> Iterator[Span]:
-        """Activate and return a new span that inherits from the current active span."""
+        """Activate and return a new span that inherits from the current active span or a specified parent span."""
+        opentelemetry_import.check()
+        
         # If parent_span is provided and is an OpenTelemetrySpan, use its context
         context = None
         if parent_span and isinstance(parent_span, OpenTelemetrySpan):
+            # Create a parent-child relationship using span context
             parent_context = parent_span.raw_span().get_span_context()
-            context = opentelemetry.trace.set_span_in_context(opentelemetry.trace.NonRecordingSpan(parent_context))
+            # Here we create a NonRecordingSpan with the parent context and use it to create a new context
+            # This ensures that the new span is a child of the parent span
+            context = otel_context.get_current()
+            context = opentelemetry.trace.set_span_in_context(opentelemetry.trace.NonRecordingSpan(parent_context), context)
         
         # Start the span with the parent context if available
         with self._tracer.start_as_current_span(operation_name, context=context) as raw_span:
