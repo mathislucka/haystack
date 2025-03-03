@@ -417,6 +417,10 @@ class OpenAIChatGenerator:
         chunk = None
 
         async for chunk in chat_completion:  # pylint: disable=not-an-iterable
+            # Skip chunks with empty choices array (usage statistics chunks)
+            if not chunk.choices:
+                continue
+                
             assert len(chunk.choices) == 1, "Streaming responses should have only one choice."
             chunk_delta: StreamingChunk = self._convert_chat_completion_chunk_to_streaming_chunk(chunk)
             chunks.append(chunk_delta)
