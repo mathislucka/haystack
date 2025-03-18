@@ -25,6 +25,21 @@ class ChatPromptBuilder:
     Template variables in the template are optional unless specified otherwise.
     If an optional variable isn't provided, it defaults to an empty string. Use `variable` and `required_variables`
     to define input types and required variables.
+    
+    The component supports the Jinja2TimeExtension if the 'arrow' package is installed, 
+    which allows you to use the {% now %} tag to insert the current date/time in your templates:
+
+    ```python
+    from haystack.dataclasses import ChatMessage
+
+    system_message = ChatMessage.from_system("Current time: {% now 'UTC' %}")
+    user_message = ChatMessage.from_user("What is today's date? For reference, it is {% now 'UTC', '%Y-%m-%d' %}")
+    template = [system_message, user_message]
+    builder = ChatPromptBuilder(template=template)
+    prompt = builder.run()
+    ```
+
+    You can install the required dependency with: `pip install arrow>=1.3.0`
 
     ### Usage examples
 
